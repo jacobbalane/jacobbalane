@@ -54,8 +54,8 @@
   <img src="https://github-readme-stats.vercel.app/api?username=jacobbalane&hide_title=false&hide_rank=true&show_icons=true&include_all_commits=true&count_private=true&disable_animations=false&theme=dark&locale=en&hide_border=false&order=1&custom_title=Github%20Stats" height="150" alt="stats graph"  />
   <img src="https://github-readme-stats.vercel.app/api/top-langs?username=jacobbalane&locale=en&hide_title=false&layout=compact&card_width=320&langs_count=8&theme=dark&hide_border=false&order=2" height="150" alt="languages graph"  />
   <img src="https://streak-stats.demolab.com?user=jacobbalane&locale=en&mode=daily&theme=dark&hide_border=false&border_radius=5&order=3" height="150" alt="streak graph"  />
-  <img src="https://github-profile-trophy.vercel.app?username=jacobbalane&theme=darkhub&column=5&row=2&margin-w=6&margin-h=6&no-bg=false&no-frame=false&order=4" height="150" alt="trophy graph"  />
   <img src="https://github-readme-activity-graph.vercel.app/graph?username=jacobbalane&radius=8&theme=github-dark&area=true&order=5&bg_color=0a0a0a&color=808080&title_color=fafafa&line=E0115F&point=fafafa&area_color=de3163&custom_title=Contribution%20Graph" height="295" alt="activity-graph graph"  />
+  <img src="https://github-profile-trophy.vercel.app?username=jacobbalane&theme=darkhub&column=10&row=1&margin-w=6&margin-h=6&no-bg=false&no-frame=false&order=4" height="150" alt="trophy graph"  />
 </div>
 
 ###
