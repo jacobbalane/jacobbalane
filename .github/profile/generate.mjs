@@ -4,9 +4,10 @@
 // workflow runs this once a day and commits the result.
 //
 //   GITHUB_TOKEN=<token> node .github/profile/generate.mjs
-//   node .github/profile/generate.mjs --raw response.json --out <dir> --now 2026-11-20T00:00:00Z
+//   node .github/profile/generate.mjs --raw data.json --out <dir> --now 2026-11-20T00:00:00Z
 //
-// --raw renders from a saved GraphQL response instead of calling the API.
+// --raw renders from saved data ({ user, years }, as fetchData returns) instead of calling the API.
+// --accent overrides the color in config.json.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +22,7 @@ const now = args.now ? new Date(args.now) : new Date();
 
 // ---------------------------------------------------------------- data
 
-const QUERY = `query($login: String!) {
+const PROFILE_QUERY = `query($login: String!) {
   user(login: $login) {
     createdAt
     followers { totalCount }
@@ -29,40 +30,64 @@ const QUERY = `query($login: String!) {
     repos: repositories(ownerAffiliations: OWNER, isFork: false, first: 100, orderBy: {field: PUSHED_AT, direction: DESC}) {
       nodes { languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } }
     }
-    contributionsCollection {
-      contributionCalendar {
-        totalContributions
-        weeks { contributionDays { date contributionCount contributionLevel } }
-      }
-    }
+    contributionsCollection { contributionCalendar { totalContributions } }
   }
 }`;
 
-async function fetchResponse() {
+// GitHub returns at most one year of contributions per collection, so the
+// all-time history asks for one aliased collection per calendar year.
+function historyQuery(years) {
+  const fields = years.map((year) => {
+    const to = year === now.getUTCFullYear() ? now.toISOString() : `${year}-12-31T23:59:59Z`;
+    return `y${year}: contributionsCollection(from: "${year}-01-01T00:00:00Z", to: "${to}") { contributionCalendar { weeks { contributionDays { date contributionCount } } } }`;
+  });
+  return `query($login: String!) { user(login: $login) { ${fields.join(" ")} } }`;
+}
+
+async function graphql(query) {
   const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new Error("Set GITHUB_TOKEN, or pass --raw <saved response>.");
+  if (!token) throw new Error("Set GITHUB_TOKEN, or pass --raw <saved data>.");
   const res = await fetch("https://api.github.com/graphql", {
     method: "POST",
     headers: { Authorization: `bearer ${token}`, "Content-Type": "application/json", "User-Agent": "profile-terminal" },
-    body: JSON.stringify({ query: QUERY, variables: { login: config.login } }),
+    body: JSON.stringify({ query, variables: { login: config.login } }),
   });
   const body = await res.json();
   if (!res.ok || body.errors || !body.data?.user) {
     throw new Error(`GitHub API request failed (${res.status}): ${JSON.stringify(body.errors ?? body)}`);
   }
-  return body;
+  return body.data.user;
 }
 
-const LEVELS = { NONE: 0, FIRST_QUARTILE: 1, SECOND_QUARTILE: 2, THIRD_QUARTILE: 3, FOURTH_QUARTILE: 4 };
-const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const weekday = (date) => new Date(`${date}T00:00:00Z`).getUTCDay();
+async function fetchData() {
+  const user = await graphql(PROFILE_QUERY);
+  const years = [];
+  for (let year = new Date(user.createdAt).getUTCFullYear(); year <= now.getUTCFullYear(); year++) years.push(year);
+  const history = await graphql(historyQuery(years));
+  return { user, years: Object.fromEntries(years.map((year) => [year, history[`y${year}`].contributionCalendar])) };
+}
 
-function summarize(user) {
-  const calendar = user.contributionsCollection.contributionCalendar;
-  const weeks = calendar.weeks.map((week) =>
-    week.contributionDays.map((d) => ({ date: d.date, count: d.contributionCount, level: LEVELS[d.contributionLevel] ?? 0 })),
-  );
-  const days = weeks.flat();
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const DAY_MS = 86400000;
+const isoDate = (ms) => new Date(ms).toISOString().slice(0, 10);
+// Column of a date in its year's row: weeks start on Sunday, like GitHub's calendar.
+function weekOfYear(date) {
+  const ms = Date.parse(`${date}T00:00:00Z`);
+  const jan1 = Date.UTC(new Date(ms).getUTCFullYear(), 0, 1);
+  return Math.min(52, Math.floor(((ms - jan1) / DAY_MS + new Date(jan1).getUTCDay()) / 7));
+}
+
+function summarize({ user, years }) {
+  const counts = new Map();
+  for (const calendar of Object.values(years)) {
+    for (const week of calendar.weeks) for (const day of week.contributionDays) counts.set(day.date, day.contributionCount);
+  }
+  const joined = user.createdAt.slice(0, 10);
+  const today = isoDate(now.getTime());
+  const days = [];
+  for (let ms = Date.parse(`${joined}T00:00:00Z`); isoDate(ms) <= today; ms += DAY_MS) {
+    days.push({ date: isoDate(ms), count: counts.get(isoDate(ms)) ?? 0 });
+  }
 
   let best = 0;
   let run = 0;
@@ -77,8 +102,26 @@ function summarize(user) {
   for (; i >= 0 && days[i].count > 0; i--) current++;
 
   const perWeekday = Array(7).fill(0);
-  for (const day of days) perWeekday[weekday(day.date)] += day.count;
+  for (const day of days) perWeekday[new Date(`${day.date}T00:00:00Z`).getUTCDay()] += day.count;
   const top = Math.max(...perWeekday);
+
+  // One row per year, one cell per week, shaded by quartile of the non-empty weeks.
+  const firstYear = Number(joined.slice(0, 4));
+  const grid = [];
+  for (let year = firstYear; year <= now.getUTCFullYear(); year++) {
+    grid.push({ year, weeks: Array.from({ length: 53 }, () => ({ count: 0, active: false, level: 0 })) });
+  }
+  for (const day of days) {
+    const week = grid[Number(day.date.slice(0, 4)) - firstYear].weeks[weekOfYear(day.date)];
+    week.count += day.count;
+    week.active = true;
+  }
+  const sums = grid.flatMap((row) => row.weeks).filter((w) => w.count > 0).map((w) => w.count).sort((a, b) => a - b);
+  const quartile = (p) => sums[Math.min(sums.length - 1, Math.floor(p * sums.length))] ?? 0;
+  const [q1, q2, q3] = [quartile(0.25), quartile(0.5), quartile(0.75)];
+  for (const week of grid.flatMap((row) => row.weeks)) {
+    week.level = week.count === 0 ? 0 : week.count <= q1 ? 1 : week.count <= q2 ? 2 : week.count <= q3 ? 3 : 4;
+  }
 
   const sizes = new Map();
   for (const repo of user.repos.nodes) {
@@ -93,14 +136,16 @@ function summarize(user) {
   const languages = [...sizes.values()]
     .sort((a, b) => b.size - a.size)
     .slice(0, 5)
-    .map((l) => ({ name: l.name, color: l.color, pct: Math.max(1, Math.round((l.size / totalSize) * 100)) }));
+    .map((l) => ({ name: l.name, pct: Math.max(1, Math.round((l.size / totalSize) * 100)) }));
 
   return {
     createdAt: user.createdAt,
     followers: user.followers.totalCount,
     publicRepos: user.publicRepos.totalCount,
-    total: calendar.totalContributions,
-    weeks,
+    lastYear: user.contributionsCollection.contributionCalendar.totalContributions,
+    allTime: days.reduce((sum, day) => sum + day.count, 0),
+    firstYear,
+    grid,
     streak: { current, best },
     busiest: top > 0 ? `${WEEKDAYS[perWeekday.indexOf(top)]}s` : "still warming up",
     languages,
@@ -136,6 +181,7 @@ const ADV = 7.8; // every monospace line is stretched to exactly this advance pe
 const COLS = Math.floor((W - 2 * PAD) / ADV);
 const MONO = "ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_START_DAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
 // Grays plus one accent color, chosen with "accent" in config.json.
 const NEUTRALS = {
@@ -167,6 +213,16 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 const fmt = (n) => n.toLocaleString("en-US");
 const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
 
+function wrap(text, width) {
+  const lines = [""];
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const cur = lines[lines.length - 1];
+    if (cur && cur.length + 1 + word.length > width) lines.push(word);
+    else lines[lines.length - 1] = cur ? `${cur} ${word}` : word;
+  }
+  return lines.filter(Boolean);
+}
+
 function render(s, t) {
   const host = config.prompt;
   let css = "";
@@ -175,7 +231,7 @@ function render(s, t) {
   // One monospace line made of [text, color] segments, stretched to an exact width.
   const mono = (x, y, segs, extra = "") => {
     const chars = segs.reduce((n, [str]) => n + str.length, 0);
-    return `<text x="${x.toFixed(1)}" y="${y}" textLength="${(chars * ADV).toFixed(1)}" lengthAdjust="spacing" ${extra}>${segs
+    return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" textLength="${(chars * ADV).toFixed(1)}" lengthAdjust="spacing" ${extra}>${segs
       .map(([str, color]) => `<tspan fill="${color}">${esc(str)}</tspan>`)
       .join("")}</text>`;
   };
@@ -233,7 +289,7 @@ function render(s, t) {
   const stats = [
     comment("# github stats"),
     row("Repos.Public", fmt(s.publicRepos), half),
-    row("Contributions", `${fmt(s.total)} in the last year`, half),
+    row("Contributions", `${fmt(s.lastYear)} in the last year`, half),
     row("Streak", s.streak.current ? `${plural(s.streak.current, "day")} (best ${fmt(s.streak.best)})` : `best ${plural(s.streak.best, "day")}`, half),
     row("Busiest.Day", s.busiest, half),
     row("Followers", fmt(s.followers), half),
@@ -259,46 +315,50 @@ function render(s, t) {
   }
   clock += rowsHere * 0.06 + 0.3;
 
-  // Contribution calendar.
+  // All-time contributions: one row per year, one square per week.
   y += 14;
-  const second = prompt(y, "cal --contributions", clock + 0.25);
+  const second = prompt(y, "cal --contributions --all", clock + 0.25);
   o += `<g ${fade(clock)}>${second.svg}</g>`;
   clock = second.end + 0.2;
-  const gridTop = y + 30;
-  const step = (COLS * ADV + 3) / s.weeks.length; // grid spans the same width as the text
+  const labelW = 5 * ADV;
+  const gridX = PAD + labelW;
+  const step = (COLS * ADV - labelW + 3) / 53; // the grid ends where the text does
   const cell = step - 3;
-  let lastMonth = new Date(`${s.weeks[0][0].date}T00:00:00Z`).getUTCMonth();
-  let lastLabel = -10;
-  s.weeks.forEach((week, wi) => {
-    const delay = clock + wi * 0.018;
-    let cells = "";
-    for (const day of week) {
-      cells += `<rect x="${(PAD + wi * step).toFixed(1)}" y="${(gridTop + weekday(day.date) * step).toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}" rx="2" fill="${t.heat[day.level]}"/>`;
-    }
-    o += `<g ${fade(delay)}>${cells}</g>`;
-    const month = new Date(`${week[0].date}T00:00:00Z`).getUTCMonth();
-    if (month !== lastMonth) {
-      if (wi - lastLabel >= 3 && wi <= s.weeks.length - 2) {
-        o += mono(PAD + wi * step, gridTop - 9, [[MONTHS[month], t.muted]], `font-size="11" ${fade(delay)}`);
-        lastLabel = wi;
-      }
-      lastMonth = month;
-    }
+  const gridTop = y + 30;
+  MONTHS.forEach((name, m) => {
+    o += mono(gridX + Math.round(MONTH_START_DAY[m] / 7) * step, gridTop - 9, [[name, t.muted]], `font-size="11" ${fade(clock)}`);
   });
-  const gridRight = PAD + s.weeks.length * step - 3;
-  const legendY = Math.round(gridTop + 7 * step + 16);
-  clock += s.weeks.length * 0.018;
-  let lx = gridRight - 4 * ADV - 4 - 5 * 14;
+  const columns = Array(53).fill("");
+  s.grid.forEach((yearRow, r) => {
+    const top = gridTop + r * step;
+    o += mono(PAD, top + cell / 2 + 4, [[String(yearRow.year), t.muted]], `font-size="11" ${fade(clock)}`);
+    yearRow.weeks.forEach((week, c) => {
+      if (!week.active) return; // before joining GitHub, or still ahead this year
+      columns[c] += `<rect x="${(gridX + c * step).toFixed(1)}" y="${top.toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}" rx="2" fill="${t.heat[week.level]}"/>`;
+    });
+  });
+  columns.forEach((cells, c) => {
+    if (cells) o += `<g ${fade(clock + c * 0.018)}>${cells}</g>`;
+  });
+  clock += 53 * 0.018;
+
+  const legendY = Math.round(gridTop + s.grid.length * step - 3 + 19);
+  let lx = rightEnd - 4 * ADV - 4 - 5 * 14;
   o += mono(lx - 5 * ADV, legendY, [["less ", t.muted]], `font-size="11" ${fade(clock)}`);
   t.heat.forEach((color, i) => {
     o += `<rect x="${(lx + i * 14).toFixed(1)}" y="${legendY - 10}" width="11" height="11" rx="2" fill="${color}" ${fade(clock)}/>`;
   });
   lx += 5 * 14 + 4;
   o += mono(lx, legendY, [["more", t.muted]], `font-size="11" ${fade(clock)}`);
-  o += mono(PAD, legendY, [[`${plural(s.total, "contribution")} in the last year`, t.muted]], `font-size="11" ${fade(clock)}`);
+  o += mono(PAD, legendY, [[`${plural(s.allTime, "contribution")} since ${s.firstYear}`, t.muted]], `font-size="11" ${fade(clock)}`);
+  y = legendY;
+  for (const line of config.heatmapNote ? wrap(config.heatmapNote, COLS - 2) : []) {
+    y += LH;
+    o += mono(PAD, y, comment(`# ${line}`), fade(clock));
+  }
 
   // Final prompt with a blinking cursor.
-  y = legendY + LH + 14;
+  y += LH + 14;
   const last = prompt(y, "", clock + 0.2);
   o += `<g ${fade(clock + 0.2)}>${last.svg}<rect x="${last.cursorX.toFixed(1)}" y="${y - 12}" width="8" height="16" fill="${t.fg}" class="c"/></g>`;
 
@@ -317,7 +377,9 @@ function render(s, t) {
     `.c{animation:c 1.1s step-end infinite}@keyframes c{50%{opacity:0}}` +
     css +
     `@media (prefers-reduced-motion:reduce){*{animation:none!important}}`;
-  const label = `Terminal running neofetch for ${host}: ${config.role} in ${config.location}, ${fmt(s.total)} contributions in the last year.`;
+  const label =
+    `Terminal running neofetch for ${host}: ${config.role} in ${config.location}, ` +
+    `${fmt(s.lastYear)} contributions in the last year and ${fmt(s.allTime)} since ${s.firstYear}.`;
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">` +
     `<title>${esc(label)}</title><style>${style}</style>${frame}${o}</svg>\n`
@@ -326,8 +388,8 @@ function render(s, t) {
 
 // ---------------------------------------------------------------- main
 
-const response = args.raw ? JSON.parse(fs.readFileSync(args.raw, "utf8")) : await fetchResponse();
-const summary = summarize(response.data.user);
+const data = args.raw ? JSON.parse(fs.readFileSync(args.raw, "utf8")) : await fetchData();
+const summary = summarize(data);
 fs.mkdirSync(outDir, { recursive: true });
 for (const [mode, theme] of Object.entries(THEMES)) {
   const file = path.join(outDir, `terminal-${mode}.svg`);

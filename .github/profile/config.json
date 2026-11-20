@@ -4,7 +4,7 @@
   "role": "Full-Stack Developer",
   "location": "Cebu, Philippines",
   "timezone": "Asia/Manila",
-  "accent": "red",
+  "accent": "green",
   "shell": "Claude Code, Codex",
   "stack": {
     "Frontend": ["Next.js", "React", "TypeScript", "Tailwind CSS"],
@@ -12,5 +12,6 @@
     "Backend": ["Node.js", "Supabase", "PostgreSQL"],
     "Deploy": ["Vercel", "Netlify"]
   },
+  "heatmapNote": "Excludes company work: private repos I don't own, committed under a separate work email and name.",
   "excludeLanguages": ["Jupyter Notebook"]
 }
