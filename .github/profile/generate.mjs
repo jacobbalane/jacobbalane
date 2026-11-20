@@ -192,16 +192,8 @@ function summarize({ user, years, projects = [] }) {
   };
 }
 
-function uptime(createdAt) {
-  const start = new Date(createdAt);
-  let months = (now.getUTCFullYear() - start.getUTCFullYear()) * 12 + now.getUTCMonth() - start.getUTCMonth();
-  if (now.getUTCDate() < start.getUTCDate()) months--;
-  const unit = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-  const parts = [];
-  if (months >= 12) parts.push(unit(Math.floor(months / 12), "year"));
-  if (months % 12) parts.push(unit(months % 12, "month"));
-  return parts.length ? `${parts.join(", ")} on GitHub` : "just joined GitHub";
-}
+// "March 2020"
+const monthYear = (iso) => new Date(iso).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 
 function lastLogin() {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -281,7 +273,7 @@ function render(s, t) {
   const mono = (x, y, segs, extra = "") => {
     const chars = segs.reduce((n, [str]) => n + str.length, 0);
     return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" textLength="${(chars * ADV).toFixed(1)}" lengthAdjust="spacing" ${extra}>${segs
-      .map(([str, color]) => `<tspan fill="${color}">${esc(str)}</tspan>`)
+      .map(([str, color, weight]) => `<tspan fill="${color}"${weight ? ` font-weight="${weight}"` : ""}>${esc(str)}</tspan>`)
       .join("")}</text>`;
   };
   const comment = (str) => [[str, t.muted]];
@@ -294,7 +286,7 @@ function render(s, t) {
   // Their resting position is past the end of the command, so without animation the text is simply shown.
   const prompt = (y, cmd, start) => {
     const cmdX = PAD + (host.length + 5) * ADV;
-    let out = mono(PAD, y, [[host, t.accent], [" ~ % ", t.muted]]);
+    let out = mono(PAD, y, [[host, t.key, 700], [" ~ % ", t.muted]]);
     if (!cmd) return { svg: out, end: start, cursorX: cmdX };
     out += mono(cmdX, y, [[cmd, t.fg]]);
     const dist = cmd.length * ADV;
@@ -312,19 +304,19 @@ function render(s, t) {
   let y = 36 + 30;
   o += mono(PAD, y, comment(lastLogin()));
   y += LH;
-  const first = prompt(y, "neofetch", 0.4);
+  const first = prompt(y, "whoami", 0.4);
   o += first.svg;
   let clock = first.end + 0.25;
 
   // Profile, full width, in the dotted style of the original README.
   y += LH + 10;
   const profile = [
-    comment(`# ${host}`),
-    row("Kernel", config.role),
-    row("Host", config.location),
-    row("Uptime", uptime(s.createdAt)),
-    row("Shell", config.shell),
-    ...Object.entries(config.stack).map(([group, items]) => row(`Stack.${group}`, items.join(", "))),
+    comment("# about me"),
+    row("Role", config.role),
+    row("Location", config.location),
+    row("On GitHub since", monthYear(s.createdAt)),
+    row("AI tools", config.aiTools),
+    ...Object.entries(config.stack).map(([group, items]) => row(group, items.join(", "))),
   ];
   profile.forEach((segs, i) => {
     o += mono(PAD, y, segs, fade(clock + i * 0.04));
@@ -337,10 +329,10 @@ function render(s, t) {
   const half = Math.floor((COLS - 5) / 2);
   const stats = [
     comment("# github stats"),
-    row("Repos.Public", fmt(s.publicRepos), half),
+    row("Public repos", fmt(s.publicRepos), half),
     row("Contributions", `${fmt(s.lastYear)} in the last year`, half),
     row("Streak", s.streak.current ? `${plural(s.streak.current, "day")} (best ${fmt(s.streak.best)})` : `best ${plural(s.streak.best, "day")}`, half),
-    row("Busiest.Day", s.busiest, half),
+    row("Busiest day", s.busiest, half),
     row("Followers", fmt(s.followers), half),
   ];
   const rightX = PAD + (half + 5) * ADV;
@@ -373,7 +365,7 @@ function render(s, t) {
     y += LH + 2;
     s.projects.forEach((p, i) => {
       const delay = clock + i * 0.08;
-      o += mono(PAD, y, [[clip(p.name, 22), t.key]], fade(delay));
+      o += mono(PAD, y, [[clip(p.name, 22), t.fg, 700]], fade(delay));
       o += icon("star", PAD + 24 * ADV, y - 11, 13, t.muted, fade(delay));
       o += mono(PAD + 24 * ADV + 17, y, [[fmt(p.stars), t.muted]], fade(delay));
       if (p.forks) {
@@ -381,7 +373,7 @@ function render(s, t) {
         o += mono(PAD + 31 * ADV + 17, y, [[fmt(p.forks), t.muted]], fade(delay));
       }
       if (p.language) o += mono(PAD + 38 * ADV, y, [[clip(p.language, 11), t.muted]], fade(delay));
-      if (p.description) o += mono(PAD + 51 * ADV, y, [[clip(p.description, COLS - 51), t.fg]], fade(delay));
+      if (p.description) o += mono(PAD + 51 * ADV, y, [[clip(p.description, COLS - 51), t.muted]], fade(delay));
       y += LH;
     });
     clock += s.projects.length * 0.08 + 0.2;
@@ -389,7 +381,7 @@ function render(s, t) {
 
   // Company work can't be listed, and the card says so.
   if (config.companyNote) {
-    if (!s.projects.length) y += 14;
+    y += s.projects.length ? 8 : 14;
     const company = prompt(y, "ls ~/projects/company", clock + 0.15);
     o += `<g ${fade(clock)}>${company.svg}</g>`;
     clock = company.end + 0.2;
@@ -401,7 +393,7 @@ function render(s, t) {
 
   // All-time contributions: one row per year, one square per week.
   y += 14;
-  const second = prompt(y, "cal --contributions --all", clock + 0.15);
+  const second = prompt(y, "contributions --all-time", clock + 0.15);
   o += `<g ${fade(clock)}>${second.svg}</g>`;
   clock = second.end + 0.2;
   const labelW = 5 * ADV;
@@ -474,7 +466,7 @@ function render(s, t) {
     css +
     `@media (prefers-reduced-motion:reduce){*{animation:none!important}}`;
   const label =
-    `Terminal running neofetch for ${host}: ${config.role} in ${config.location}, ` +
+    `Terminal profile card for ${host}: ${config.role} in ${config.location}, ` +
     `${fmt(s.lastYear)} contributions in the last year and ${fmt(s.allTime)} since ${s.firstYear}.`;
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">` +

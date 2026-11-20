@@ -5,7 +5,7 @@
   "location": "Cebu, Philippines",
   "timezone": "Asia/Manila",
   "accent": "green",
-  "shell": "Claude Code, Codex",
+  "aiTools": "Claude Code, Codex",
   "stack": {
     "Frontend": ["Next.js", "React", "TypeScript", "Tailwind CSS"],
     "Motion": ["Three.js", "GSAP"],

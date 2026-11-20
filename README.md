@@ -4,5 +4,5 @@ I'm Jacob, a full-stack developer from Cebu, Philippines. Lately I've been makin
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/terminal-dark-3f072ae2f4.svg">
-  <img alt="Terminal running neofetch for jacob@balane: stack, GitHub stats and a year of contributions" src="assets/terminal-light-fc7fd88902.svg" width="100%">
+  <img alt="Terminal profile card for jacob@balane: about me, GitHub stats, languages, projects and all-time contributions" src="assets/terminal-light-fc7fd88902.svg" width="100%">
 </picture>
