@@ -8,6 +8,8 @@
 //
 // --raw renders from saved data ({ user, years }, as fetchData returns) instead of calling the API.
 // --accent overrides the color in config.json.
+// --readme is the README to point at the new images (default: the repo's, unless --out is given).
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -391,8 +393,21 @@ function render(s, t) {
 const data = args.raw ? JSON.parse(fs.readFileSync(args.raw, "utf8")) : await fetchData();
 const summary = summarize(data);
 fs.mkdirSync(outDir, { recursive: true });
+
+// Each version gets a new file name (a hash of its content) and the README is
+// pointed at it, so GitHub's image caches can never serve yesterday's card.
+const readmePath = args.readme ?? (args.out ? null : path.join(here, "../../README.md"));
+const CARD_FILE = /^terminal-(dark|light)(-[0-9a-f]+)?\.svg$/;
+for (const old of fs.readdirSync(outDir).filter((name) => CARD_FILE.test(name))) fs.rmSync(path.join(outDir, old));
+let readme = readmePath ? fs.readFileSync(readmePath, "utf8") : null;
 for (const [mode, theme] of Object.entries(THEMES)) {
-  const file = path.join(outDir, `terminal-${mode}.svg`);
-  fs.writeFileSync(file, render(summary, theme));
-  console.log(`wrote ${path.relative(process.cwd(), file)}`);
+  const svg = render(summary, theme);
+  const name = `terminal-${mode}-${createHash("sha256").update(svg).digest("hex").slice(0, 10)}.svg`;
+  fs.writeFileSync(path.join(outDir, name), svg);
+  console.log(`wrote ${path.relative(process.cwd(), path.join(outDir, name))}`);
+  if (readme) readme = readme.replace(new RegExp(`assets/terminal-${mode}(-[0-9a-f]+)?\\.svg`, "g"), `assets/${name}`);
+}
+if (readme) {
+  fs.writeFileSync(readmePath, readme);
+  console.log(`updated ${path.relative(process.cwd(), readmePath)}`);
 }
