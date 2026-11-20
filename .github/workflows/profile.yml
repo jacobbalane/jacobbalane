@@ -1,0 +1,45 @@
+name: Profile terminal
+
+on:
+  schedule:
+    - cron: "37 16 * * *" # daily, 00:37 in Cebu (UTC+8)
+  workflow_dispatch:
+  # Redraw on any branch where the generator changes, so a pull request shows the real card.
+  push:
+    paths: [".github/profile/**", ".github/workflows/profile.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: profile-terminal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Draw the terminal card
+        run: node .github/profile/generate.mjs
+        env:
+          # PROFILE_TOKEN is optional: a personal access token lets the language
+          # breakdown include your private repositories.
+          GITHUB_TOKEN: ${{ secrets.PROFILE_TOKEN || github.token }}
+
+      - name: Commit if anything changed
+        run: |
+          git add assets
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update profile terminal"
+          git push

@@ -1,0 +1,16 @@
+{
+  "login": "jacobbalane",
+  "prompt": "jacob@balane",
+  "role": "Full-Stack Developer",
+  "location": "Cebu, Philippines",
+  "timezone": "Asia/Manila",
+  "accent": "red",
+  "shell": "Claude Code, Codex",
+  "stack": {
+    "Frontend": ["Next.js", "React", "TypeScript", "Tailwind CSS"],
+    "Motion": ["Three.js", "GSAP"],
+    "Backend": ["Node.js", "Supabase", "PostgreSQL"],
+    "Deploy": ["Vercel", "Netlify"]
+  },
+  "excludeLanguages": ["Jupyter Notebook"]
+}
