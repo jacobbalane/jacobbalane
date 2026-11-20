@@ -14,7 +14,7 @@
   },
   "projects": [
     { "repo": "jacobbalane/Glim", "description": "A desktop island for Claude Code and Codex CLI" },
-    { "repo": "reactcebu/react-cebu-website-v2", "description": "Website for the React Cebu developer community" }
+    { "repo": "jacobbalane/react-cebu", "description": "The 2026 website for the React Cebu community" }
   ],
   "companyNote": "company projects live in private repos",
   "heatmapNote": "Excludes company work: private repos I don't own, committed under a separate work email and name.",
