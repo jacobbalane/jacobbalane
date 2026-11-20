@@ -29,44 +29,77 @@ const PROFILE_QUERY = `query($login: String!) {
     createdAt
     followers { totalCount }
     publicRepos: repositories(ownerAffiliations: OWNER, privacy: PUBLIC) { totalCount }
-    repos: repositories(ownerAffiliations: OWNER, isFork: false, first: 100, orderBy: {field: PUSHED_AT, direction: DESC}) {
-      nodes { languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } }
-    }
     contributionsCollection { contributionCalendar { totalContributions } }
   }
 }`;
 
+// Languages come from every non-fork repo the token can see: your own, your
+// organizations' and ones you collaborate on. The workflow's built-in token
+// only sees public repos; a PROFILE_TOKEN secret also brings in private ones.
+const REPOS_QUERY = `query($login: String!, $cursor: String) {
+  user(login: $login) {
+    repositories(ownerAffiliations: [OWNER, ORGANIZATION_MEMBER, COLLABORATOR], isFork: false, first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name } } } }
+    }
+  }
+}`;
+
 // GitHub returns at most one year of contributions per collection, so the
-// all-time history asks for one aliased collection per calendar year.
+// all-time history asks for one aliased collection per calendar year. The
+// projects listed in config.json come along in the same request.
 function historyQuery(years) {
   const fields = years.map((year) => {
     const to = year === now.getUTCFullYear() ? now.toISOString() : `${year}-12-31T23:59:59Z`;
     return `y${year}: contributionsCollection(from: "${year}-01-01T00:00:00Z", to: "${to}") { contributionCalendar { weeks { contributionDays { date contributionCount } } } }`;
   });
-  return `query($login: String!) { user(login: $login) { ${fields.join(" ")} } }`;
+  const projects = (config.projects ?? []).map(({ repo }, i) => {
+    const [owner, name] = repo.split("/");
+    return `p${i}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { name description stargazerCount forkCount primaryLanguage { name } }`;
+  });
+  return `query($login: String!) { user(login: $login) { ${fields.join(" ")} } ${projects.join(" ")} }`;
 }
 
-async function graphql(query) {
+async function graphql(query, variables = {}) {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("Set GITHUB_TOKEN, or pass --raw <saved data>.");
   const res = await fetch("https://api.github.com/graphql", {
     method: "POST",
     headers: { Authorization: `bearer ${token}`, "Content-Type": "application/json", "User-Agent": "profile-terminal" },
-    body: JSON.stringify({ query, variables: { login: config.login } }),
+    body: JSON.stringify({ query, variables: { login: config.login, ...variables } }),
   });
   const body = await res.json();
   if (!res.ok || body.errors || !body.data?.user) {
     throw new Error(`GitHub API request failed (${res.status}): ${JSON.stringify(body.errors ?? body)}`);
   }
-  return body.data.user;
+  return body.data;
 }
 
 async function fetchData() {
-  const user = await graphql(PROFILE_QUERY);
+  const { user } = await graphql(PROFILE_QUERY);
+  user.repos = { nodes: [] };
+  let cursor = null;
+  for (let page = 0; page < 10; page++) {
+    const { repositories } = (await graphql(REPOS_QUERY, { cursor })).user;
+    user.repos.nodes.push(...repositories.nodes);
+    if (!repositories.pageInfo.hasNextPage) break;
+    cursor = repositories.pageInfo.endCursor;
+  }
   const years = [];
   for (let year = new Date(user.createdAt).getUTCFullYear(); year <= now.getUTCFullYear(); year++) years.push(year);
   const history = await graphql(historyQuery(years));
-  return { user, years: Object.fromEntries(years.map((year) => [year, history[`y${year}`].contributionCalendar])) };
+  const projects = (config.projects ?? []).flatMap((project, i) => {
+    const repo = history[`p${i}`];
+    if (!repo) return []; // renamed, deleted or private: leave it out rather than fail the run
+    return [{
+      name: repo.name,
+      description: project.description ?? repo.description ?? "",
+      stars: repo.stargazerCount,
+      forks: repo.forkCount,
+      language: repo.primaryLanguage?.name ?? "",
+    }];
+  });
+  return { user, years: Object.fromEntries(years.map((year) => [year, history.user[`y${year}`].contributionCalendar])), projects };
 }
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -79,7 +112,7 @@ function weekOfYear(date) {
   return Math.min(52, Math.floor(((ms - jan1) / DAY_MS + new Date(jan1).getUTCDay()) / 7));
 }
 
-function summarize({ user, years }) {
+function summarize({ user, years, projects = [] }) {
   const counts = new Map();
   for (const calendar of Object.values(years)) {
     for (const week of calendar.weeks) for (const day of week.contributionDays) counts.set(day.date, day.contributionCount);
@@ -125,20 +158,24 @@ function summarize({ user, years }) {
     week.level = week.count === 0 ? 0 : week.count <= q1 ? 1 : week.count <= q2 ? 2 : week.count <= q3 ? 3 : 4;
   }
 
-  const sizes = new Map();
+  // Each language scores sqrt(bytes x repos using it), so one huge repo can't
+  // outweigh the language most of your projects are written in.
+  const usage = new Map();
   for (const repo of user.repos.nodes) {
     for (const { size, node } of repo.languages.edges) {
-      if (config.excludeLanguages.includes(node.name)) continue;
-      const entry = sizes.get(node.name) ?? { name: node.name, color: node.color ?? "#8b949e", size: 0 };
-      entry.size += size;
-      sizes.set(node.name, entry);
+      if (config.excludeLanguages.includes(node.name) || !size) continue;
+      const entry = usage.get(node.name) ?? { name: node.name, bytes: 0, repos: 0 };
+      entry.bytes += size;
+      entry.repos += 1;
+      usage.set(node.name, entry);
     }
   }
-  const totalSize = [...sizes.values()].reduce((sum, l) => sum + l.size, 0) || 1;
-  const languages = [...sizes.values()]
-    .sort((a, b) => b.size - a.size)
+  const scored = [...usage.values()].map((l) => ({ name: l.name, score: Math.sqrt(l.bytes * l.repos) }));
+  const totalScore = scored.reduce((sum, l) => sum + l.score, 0) || 1;
+  const languages = scored
+    .sort((a, b) => b.score - a.score)
     .slice(0, 5)
-    .map((l) => ({ name: l.name, pct: Math.max(1, Math.round((l.size / totalSize) * 100)) }));
+    .map((l) => ({ name: l.name, pct: Math.max(1, Math.round((l.score / totalScore) * 100)) }));
 
   return {
     createdAt: user.createdAt,
@@ -151,6 +188,7 @@ function summarize({ user, years }) {
     streak: { current, best },
     busiest: top > 0 ? `${WEEKDAYS[perWeekday.indexOf(top)]}s` : "still warming up",
     languages,
+    projects,
   };
 }
 
@@ -211,6 +249,15 @@ const THEMES = Object.fromEntries(
   Object.entries(NEUTRALS).map(([mode, neutral]) => [mode, { ...neutral, ...ACCENTS[accentName][mode] }]),
 );
 
+// 16x16 stroke icons for the project rows.
+const ICONS = {
+  star: '<path d="M8 1.75l1.9 3.85 4.25.62-3.08 3 .73 4.23L8 11.45l-3.8 2 .73-4.23-3.08-3 4.25-.62z"/>',
+  fork: '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/><path d="M4.5 5v1A1.5 1.5 0 0 0 6 7.5h4A1.5 1.5 0 0 0 11.5 6V5M8 7.5V11"/>',
+};
+const icon = (name, x, y, size, color, extra = "") =>
+  `<g transform="translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${size / 16})" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" ${extra}>${ICONS[name]}</g>`;
+const clip = (text, width) => (text.length <= width ? text : `${text.slice(0, width - 1).trimEnd()}…`);
+
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmt = (n) => n.toLocaleString("en-US");
 const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
@@ -251,7 +298,7 @@ function render(s, t) {
     if (!cmd) return { svg: out, end: start, cursorX: cmdX };
     out += mono(cmdX, y, [[cmd, t.fg]]);
     const dist = cmd.length * ADV;
-    const dur = cmd.length * 0.055;
+    const dur = cmd.length * 0.03;
     const id = keyframeId++;
     css += `@keyframes s${id}{from{transform:translateX(-${dist}px)}to{transform:translateX(0)}}`;
     css += `@keyframes k${id}{from{opacity:1;transform:translateX(-${dist}px)}to{opacity:1;transform:translateX(0)}}`;
@@ -265,7 +312,7 @@ function render(s, t) {
   let y = 36 + 30;
   o += mono(PAD, y, comment(lastLogin()));
   y += LH;
-  const first = prompt(y, "neofetch", 0.6);
+  const first = prompt(y, "neofetch", 0.4);
   o += first.svg;
   let clock = first.end + 0.25;
 
@@ -280,10 +327,10 @@ function render(s, t) {
     ...Object.entries(config.stack).map(([group, items]) => row(`Stack.${group}`, items.join(", "))),
   ];
   profile.forEach((segs, i) => {
-    o += mono(PAD, y, segs, fade(clock + i * 0.06));
+    o += mono(PAD, y, segs, fade(clock + i * 0.04));
     y += LH;
   });
-  clock += profile.length * 0.06;
+  clock += profile.length * 0.04;
 
   // GitHub stats on the left, languages on the right.
   y += LH;
@@ -303,7 +350,7 @@ function render(s, t) {
   const maxPct = Math.max(...s.languages.map((l) => l.pct), 1);
   const rowsHere = Math.max(stats.length, s.languages.length + 1);
   for (let i = 0; i < rowsHere; i++) {
-    const delay = clock + i * 0.06;
+    const delay = clock + i * 0.04;
     if (stats[i]) o += mono(PAD, y, stats[i], fade(delay));
     if (i === 0) o += mono(rightX, y, comment("# languages"), fade(delay));
     const l = s.languages[i - 1];
@@ -315,11 +362,46 @@ function render(s, t) {
     }
     y += LH;
   }
-  clock += rowsHere * 0.06 + 0.3;
+  clock += rowsHere * 0.04 + 0.2;
+
+  // Personal projects, in columns: name, stars, forks, language, description.
+  if (s.projects.length) {
+    y += 14;
+    const list = prompt(y, "ls ~/projects/personal", clock + 0.15);
+    o += `<g ${fade(clock)}>${list.svg}</g>`;
+    clock = list.end + 0.2;
+    y += LH + 2;
+    s.projects.forEach((p, i) => {
+      const delay = clock + i * 0.08;
+      o += mono(PAD, y, [[clip(p.name, 22), t.key]], fade(delay));
+      o += icon("star", PAD + 24 * ADV, y - 11, 13, t.muted, fade(delay));
+      o += mono(PAD + 24 * ADV + 17, y, [[fmt(p.stars), t.muted]], fade(delay));
+      if (p.forks) {
+        o += icon("fork", PAD + 31 * ADV, y - 11, 13, t.muted, fade(delay));
+        o += mono(PAD + 31 * ADV + 17, y, [[fmt(p.forks), t.muted]], fade(delay));
+      }
+      if (p.language) o += mono(PAD + 38 * ADV, y, [[clip(p.language, 11), t.muted]], fade(delay));
+      if (p.description) o += mono(PAD + 51 * ADV, y, [[clip(p.description, COLS - 51), t.fg]], fade(delay));
+      y += LH;
+    });
+    clock += s.projects.length * 0.08 + 0.2;
+  }
+
+  // Company work can't be listed, and the card says so.
+  if (config.companyNote) {
+    if (!s.projects.length) y += 14;
+    const company = prompt(y, "ls ~/projects/company", clock + 0.15);
+    o += `<g ${fade(clock)}>${company.svg}</g>`;
+    clock = company.end + 0.2;
+    y += LH;
+    o += mono(PAD, y, [["ls: company: Permission denied", t.fg], [clip(`  # ${config.companyNote}`, COLS - 30), t.muted]], fade(clock));
+    y += LH;
+    clock += 0.3;
+  }
 
   // All-time contributions: one row per year, one square per week.
   y += 14;
-  const second = prompt(y, "cal --contributions --all", clock + 0.25);
+  const second = prompt(y, "cal --contributions --all", clock + 0.15);
   o += `<g ${fade(clock)}>${second.svg}</g>`;
   clock = second.end + 0.2;
   const labelW = 5 * ADV;
@@ -330,19 +412,29 @@ function render(s, t) {
   MONTHS.forEach((name, m) => {
     o += mono(gridX + Math.round(MONTH_START_DAY[m] / 7) * step, gridTop - 9, [[name, t.muted]], `font-size="11" ${fade(clock)}`);
   });
-  const columns = Array(53).fill("");
+  // The empty grid appears first, then every week with contributions pops in
+  // in order, year by year and left to right, replaying the history.
+  const square = (x, top, color, extra = "") =>
+    `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}" rx="2" fill="${color}" ${extra}/>`;
+  let empty = "";
+  const filled = [];
   s.grid.forEach((yearRow, r) => {
     const top = gridTop + r * step;
     o += mono(PAD, top + cell / 2 + 4, [[String(yearRow.year), t.muted]], `font-size="11" ${fade(clock)}`);
     yearRow.weeks.forEach((week, c) => {
       if (!week.active) return; // before joining GitHub, or still ahead this year
-      columns[c] += `<rect x="${(gridX + c * step).toFixed(1)}" y="${top.toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}" rx="2" fill="${t.heat[week.level]}"/>`;
+      const x = gridX + c * step;
+      empty += square(x, top, t.heat[0]);
+      if (week.level) filled.push({ x, top, color: t.heat[week.level] });
     });
   });
-  columns.forEach((cells, c) => {
-    if (cells) o += `<g ${fade(clock + c * 0.018)}>${cells}</g>`;
+  o += `<g ${fade(clock)}>${empty}</g>`;
+  clock += 0.35;
+  const gap = filled.length ? Math.min(0.03, 2.2 / filled.length) : 0;
+  filled.forEach(({ x, top, color }, i) => {
+    o += square(x, top, color, `class="p" style="animation-delay:${(clock + i * gap).toFixed(3)}s"`);
   });
-  clock += 53 * 0.018;
+  clock += filled.length * gap + 0.2;
 
   const legendY = Math.round(gridTop + s.grid.length * step - 3 + 19);
   let lx = rightEnd - 4 * ADV - 4 - 5 * 14;
@@ -376,6 +468,8 @@ function render(s, t) {
     `text{font-family:${MONO};font-size:${SIZE}px;white-space:pre}` +
     `.f{animation:f .35s ease-out both}@keyframes f{from{opacity:0}}` +
     `.g{animation:g .6s ease-out both;transform-box:fill-box;transform-origin:left center}@keyframes g{from{transform:scaleX(0)}}` +
+    `.p{animation:p .3s cubic-bezier(.2,.8,.3,1.4) both;transform-box:fill-box;transform-origin:center}` +
+    `@keyframes p{from{opacity:0;transform:scale(.2)}}` +
     `.c{animation:c 1.1s step-end infinite}@keyframes c{50%{opacity:0}}` +
     css +
     `@media (prefers-reduced-motion:reduce){*{animation:none!important}}`;
