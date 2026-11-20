@@ -214,19 +214,24 @@ function lastLogin() {
 
 // ---------------------------------------------------------------- drawing
 
-const W = 840;
-const PAD = 24;
-const SIZE = 13;
-const LH = 21;
-const PROMPT_GAP = 26; // extra space above each command
-const OUTPUT_GAP = 8; // extra space between a command and its output
-const ADV = 7.8; // every monospace line is stretched to exactly this advance per character
-const COLS = Math.floor((W - 2 * PAD) / ADV);
+// Two layouts: the full card, and a narrow one for phones (the README picks it
+// on small screens) where side-by-side columns stack and long values wrap.
+const LAYOUTS = {
+  desktop: { W: 840, PAD: 24, SIZE: 13, SMALL: 11, LH: 21, ADV: 7.8, PROMPT_GAP: 26, OUTPUT_GAP: 8, CELL_GAP: 3, compact: false },
+  mobile: { W: 380, PAD: 14, SIZE: 12, SMALL: 10, LH: 20, ADV: 7.2, PROMPT_GAP: 22, OUTPUT_GAP: 6, CELL_GAP: 2, compact: true },
+};
+// Set by useLayout() before each render; ADV is the exact advance every monospace line is stretched to.
+let W, PAD, SIZE, SMALL, LH, ADV, PROMPT_GAP, OUTPUT_GAP, CELL_GAP, COMPACT, COLS;
+function useLayout(layout) {
+  ({ W, PAD, SIZE, SMALL, LH, ADV, PROMPT_GAP, OUTPUT_GAP, CELL_GAP } = layout);
+  COMPACT = layout.compact;
+  COLS = Math.floor((W - 2 * PAD) / ADV);
+}
 const MONO = "ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_START_DAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
-// Grays plus one accent color, chosen with "accent" in config.json.
+// Grays, a color per section, and one accent chosen with "accent" in config.json.
 const NEUTRALS = {
   dark: {
     fg: "#f0f6fc", muted: "#9198a1", card: "#151b23", bar: "#212830", border: "#3d444d", company: "#8957e5",
@@ -286,7 +291,8 @@ function render(s, t) {
   let css = "";
   let keyframeId = 0;
   const fade = (delay) => `class="f" style="animation-delay:${delay.toFixed(2)}s"`;
-  // One monospace line made of [text, color] segments, stretched to an exact width.
+  const small = (delay) => `font-size="${SMALL}" ${fade(delay)}`;
+  // One monospace line made of [text, color, weight?] segments, stretched to an exact width.
   const mono = (x, y, segs, extra = "") => {
     const chars = segs.reduce((n, [str]) => n + str.length, 0);
     return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" textLength="${(chars * ADV).toFixed(1)}" lengthAdjust="spacing" ${extra}>${segs
@@ -294,10 +300,15 @@ function render(s, t) {
       .join("")}</text>`;
   };
   const comment = (str) => [[str, t.muted]];
-  const row = (key, value, width = COLS, color = t.key) => {
+  // ". Key: ........ value" on one line; when it doesn't fit, the value moves
+  // to the following line(s), right-aligned under the dots.
+  const row = (key, value, width, color) => {
     const head = `. ${key}: `;
-    const dots = Math.max(3, width - head.length - 1 - value.length);
-    return [[". ", t.muted], [`${key}:`, color], [` ${".".repeat(dots)} `, t.muted], [value, t.fg]];
+    const dots = width - head.length - 1 - value.length;
+    if (dots >= 3) return [[[". ", t.muted], [`${key}:`, color], [` ${".".repeat(dots)} `, t.muted], [value, t.fg]]];
+    const lines = [[[". ", t.muted], [`${key}:`, color], [` ${".".repeat(Math.max(3, width - head.length - 1))}`, t.muted]]];
+    for (const part of wrap(value, width - 2)) lines.push([[" ".repeat(width - part.length), t.muted], [part, t.fg]]);
+    return lines;
   };
   // A prompt whose command types itself out: a cover and a cursor slide off it one character at a time.
   // Their resting position is past the end of the command, so without animation the text is simply shown.
@@ -312,10 +323,19 @@ function render(s, t) {
     css += `@keyframes s${id}{from{transform:translateX(-${dist}px)}to{transform:translateX(0)}}`;
     css += `@keyframes k${id}{from{opacity:1;transform:translateX(-${dist}px)}to{opacity:1;transform:translateX(0)}}`;
     const timing = `${dur.toFixed(2)}s steps(${cmd.length}) ${start.toFixed(2)}s`;
-    out += `<rect x="${(cmdX + dist).toFixed(1)}" y="${y - 15}" width="${(dist + 2).toFixed(1)}" height="${LH}" fill="${t.card}" style="animation:s${id} ${timing} both"/>`;
-    out += `<rect x="${(cmdX + dist).toFixed(1)}" y="${y - 12}" width="8" height="16" fill="${t.fg}" opacity="0" style="animation:k${id} ${timing} backwards"/>`;
+    out += `<rect x="${(cmdX + dist).toFixed(1)}" y="${y - SIZE - 2}" width="${(dist + 2).toFixed(1)}" height="${LH}" fill="${t.card}" style="animation:s${id} ${timing} both"/>`;
+    out += `<rect x="${(cmdX + dist).toFixed(1)}" y="${y - SIZE + 1}" width="${ADV.toFixed(1)}" height="${SIZE + 3}" fill="${t.fg}" opacity="0" style="animation:k${id} ${timing} backwards"/>`;
     return { svg: out, end: start + dur, cursorX: cmdX };
   };
+  // Draws lines one after another, each fading in slightly after the last.
+  const lines = (list, start) => {
+    list.forEach((segs, i) => {
+      if (segs) o += mono(PAD, y, segs, fade(start + i * 0.04));
+      y += LH;
+    });
+    return start + list.length * 0.04;
+  };
+  const rightEnd = PAD + COLS * ADV;
 
   let o = "";
   let y = 36 + 30;
@@ -327,53 +347,63 @@ function render(s, t) {
 
   // Profile, full width, in the dotted style of the original README.
   y += LH + OUTPUT_GAP + 2;
-  const profile = [
-    comment("# about me"),
-    row("Role", config.role, COLS, t.about),
-    row("Location", config.location, COLS, t.about),
-    row("On GitHub since", monthYear(s.createdAt), COLS, t.about),
-    row("AI tools", config.aiTools, COLS, t.about),
-    ...Object.entries(config.stack).map(([group, items]) => row(group, items.join(", "), COLS, t.about)),
-  ];
-  profile.forEach((segs, i) => {
-    o += mono(PAD, y, segs, fade(clock + i * 0.04));
-    y += LH;
-  });
-  clock += profile.length * 0.04;
+  clock = lines(
+    [
+      comment("# about me"),
+      ...row("Role", config.role, COLS, t.about),
+      ...row("Location", config.location, COLS, t.about),
+      ...row("On GitHub since", monthYear(s.createdAt), COLS, t.about),
+      ...row("AI tools", config.aiTools, COLS, t.about),
+      ...Object.entries(config.stack).flatMap(([group, items]) => row(group, items.join(", "), COLS, t.about)),
+    ],
+    clock,
+  );
 
-  // GitHub stats on the left, languages on the right.
+  // GitHub stats, and languages beside them (or below them on phones).
   y += LH;
-  const half = Math.floor((COLS - 5) / 2);
+  const statsWidth = COMPACT ? COLS : Math.floor((COLS - 5) / 2);
   const stats = [
     comment("# github stats"),
-    row("Public repos", fmt(s.publicRepos), half, t.stats),
-    row("Contributions", `${fmt(s.lastYear)} in the last year`, half, t.stats),
-    row("Streak", s.streak.current ? `${plural(s.streak.current, "day")} (best ${fmt(s.streak.best)})` : `best ${plural(s.streak.best, "day")}`, half, t.stats),
-    row("Busiest day", s.busiest, half, t.stats),
-    row("Followers", fmt(s.followers), half, t.stats),
+    ...row("Public repos", fmt(s.publicRepos), statsWidth, t.stats),
+    ...row("Contributions", `${fmt(s.lastYear)} in the last year`, statsWidth, t.stats),
+    ...row("Streak", s.streak.current ? `${plural(s.streak.current, "day")} (best ${fmt(s.streak.best)})` : `best ${plural(s.streak.best, "day")}`, statsWidth, t.stats),
+    ...row("Busiest day", s.busiest, statsWidth, t.stats),
+    ...row("Followers", fmt(s.followers), statsWidth, t.stats),
   ];
-  const rightX = PAD + (half + 5) * ADV;
-  const rightEnd = PAD + COLS * ADV;
-  const barX = rightX + 12 * ADV;
+  const langX = COMPACT ? PAD : PAD + (statsWidth + 5) * ADV;
+  const barX = langX + 12 * ADV;
   const barMax = rightEnd - 5 * ADV - barX;
   const maxPct = Math.max(...s.languages.map((l) => l.pct), 1);
-  const rowsHere = Math.max(stats.length, s.languages.length + 1);
-  for (let i = 0; i < rowsHere; i++) {
-    const delay = clock + i * 0.04;
-    if (stats[i]) o += mono(PAD, y, stats[i], fade(delay));
-    if (i === 0) o += mono(rightX, y, comment("# languages"), fade(delay));
-    const l = s.languages[i - 1];
-    if (l) {
-      o += mono(rightX, y, [[l.name.slice(0, 11), t.fg]], fade(delay));
-      o += `<rect x="${barX.toFixed(1)}" y="${y - 9}" width="${barMax.toFixed(1)}" height="8" rx="4" fill="${t.heat[0]}" ${fade(delay)}/>`;
-      o += `<rect x="${barX.toFixed(1)}" y="${y - 9}" width="${((barMax * l.pct) / maxPct).toFixed(1)}" height="8" rx="4" fill="${t.languages}" class="g" style="animation-delay:${(delay + 0.1).toFixed(2)}s"/>`;
-      o += mono(rightEnd - 4 * ADV, y, [[`${l.pct}%`.padStart(4), t.muted]], fade(delay));
-    }
+  const language = (l, ly, delay) => {
+    o += mono(langX, ly, [[l.name.slice(0, 11), t.fg]], fade(delay));
+    o += `<rect x="${barX.toFixed(1)}" y="${ly - 9}" width="${barMax.toFixed(1)}" height="8" rx="4" fill="${t.heat[0]}" ${fade(delay)}/>`;
+    o += `<rect x="${barX.toFixed(1)}" y="${ly - 9}" width="${((barMax * l.pct) / maxPct).toFixed(1)}" height="8" rx="4" fill="${t.languages}" class="g" style="animation-delay:${(delay + 0.1).toFixed(2)}s"/>`;
+    o += mono(rightEnd - 4 * ADV, ly, [[`${l.pct}%`.padStart(4), t.muted]], fade(delay));
+  };
+  if (COMPACT) {
+    clock = lines(stats, clock);
     y += LH;
+    o += mono(langX, y, comment("# languages"), fade(clock));
+    s.languages.forEach((l, i) => {
+      y += LH;
+      language(l, y, clock + (i + 1) * 0.04);
+    });
+    y += LH;
+    clock += (s.languages.length + 1) * 0.04 + 0.2;
+  } else {
+    const rowsHere = Math.max(stats.length, s.languages.length + 1);
+    for (let i = 0; i < rowsHere; i++) {
+      const delay = clock + i * 0.04;
+      if (stats[i]) o += mono(PAD, y, stats[i], fade(delay));
+      if (i === 0) o += mono(langX, y, comment("# languages"), fade(delay));
+      if (s.languages[i - 1]) language(s.languages[i - 1], y, delay);
+      y += LH;
+    }
+    clock += rowsHere * 0.04 + 0.2;
   }
-  clock += rowsHere * 0.04 + 0.2;
 
-  // Personal projects, in columns: name, stars, forks, language, description.
+  // Personal projects: name, stars, forks, language, then the description
+  // (beside them on the full card, on its own line on phones).
   if (s.projects.length) {
     y += PROMPT_GAP;
     const list = prompt(y, "ls ~/projects/personal", clock + 0.15);
@@ -382,15 +412,29 @@ function render(s, t) {
     y += LH + OUTPUT_GAP;
     s.projects.forEach((p, i) => {
       const delay = clock + i * 0.08;
-      o += mono(PAD, y, [[clip(p.name, 22), t.projects, 700]], fade(delay));
-      o += icon("star", PAD + 24 * ADV, y - 11, 13, t.muted, fade(delay));
-      o += mono(PAD + 24 * ADV + 17, y, [[fmt(p.stars), t.muted]], fade(delay));
-      if (p.forks) {
-        o += icon("fork", PAD + 31 * ADV, y - 11, 13, t.muted, fade(delay));
-        o += mono(PAD + 31 * ADV + 17, y, [[fmt(p.forks), t.muted]], fade(delay));
+      const iconSize = SIZE;
+      const name = clip(p.name, 22);
+      o += mono(PAD, y, [[name, t.projects, 700]], fade(delay));
+      // Full card: fixed columns. Phones: stars, forks and language follow the
+      // name on one line, and the description gets its own full-width line(s).
+      let col = COMPACT ? name.length + 2 : 24;
+      const stat = (kind, n) => {
+        o += icon(kind, PAD + col * ADV, y - SIZE + 2, iconSize, t.muted, fade(delay));
+        o += mono(PAD + col * ADV + iconSize + 4, y, [[fmt(n), t.muted]], fade(delay));
+        col += COMPACT ? Math.ceil((iconSize + 4) / ADV) + String(n).length + 2 : 6;
+      };
+      stat("star", p.stars);
+      if (p.forks) stat("fork", p.forks);
+      if (p.language) o += mono(PAD + (COMPACT ? col : 37) * ADV, y, [[clip(p.language, 11), t.muted]], fade(delay));
+      if (p.description && COMPACT) {
+        for (const part of wrap(p.description, COLS)) {
+          y += LH - 2;
+          o += mono(PAD, y, [[part, t.muted]], fade(delay));
+        }
+        y += 8;
+      } else if (p.description) {
+        o += mono(PAD + 50 * ADV, y, [[clip(p.description, COLS - 50), t.muted]], fade(delay));
       }
-      if (p.language) o += mono(PAD + 38 * ADV, y, [[clip(p.language, 11), t.muted]], fade(delay));
-      if (p.description) o += mono(PAD + 51 * ADV, y, [[clip(p.description, COLS - 51), t.muted]], fade(delay));
       y += LH;
     });
     clock += s.projects.length * 0.08 + 0.2;
@@ -403,7 +447,16 @@ function render(s, t) {
     o += `<g ${fade(clock)}>${company.svg}</g>`;
     clock = company.end + 0.2;
     y += LH + OUTPUT_GAP;
-    o += mono(PAD, y, [["ls: company: ", t.fg], ["Permission denied", t.error], [clip(`  # ${config.companyNote}`, COLS - 30), t.muted]], fade(clock));
+    const denied = [["ls: company: ", t.fg], ["Permission denied", t.error]];
+    if (COMPACT) {
+      o += mono(PAD, y, denied, fade(clock));
+      for (const part of wrap(`# ${config.companyNote}`, COLS)) {
+        y += LH;
+        o += mono(PAD, y, comment(part), fade(clock));
+      }
+    } else {
+      o += mono(PAD, y, [...denied, [clip(`  # ${config.companyNote}`, COLS - 30), t.muted]], fade(clock));
+    }
     y += LH;
     clock += 0.3;
   }
@@ -415,28 +468,34 @@ function render(s, t) {
   clock = second.end + 0.2;
   const labelW = 5 * ADV;
   const gridX = PAD + labelW;
-  const step = (COLS * ADV - labelW + 3) / 53; // the grid ends where the text does
-  const cell = step - 3;
+  const weeksPerSquare = COMPACT ? 2 : 1; // phones get one square per two weeks so it stays readable
+  const columns = Math.ceil(53 / weeksPerSquare);
+  const step = (COLS * ADV - labelW + CELL_GAP) / columns; // the grid ends where the text does
+  const cell = step - CELL_GAP;
+  const radius = Math.min(2, cell / 3);
   const gridTop = y + 30 + OUTPUT_GAP;
   MONTHS.forEach((name, m) => {
-    o += mono(gridX + Math.round(MONTH_START_DAY[m] / 7) * step, gridTop - 9, [[name, t.muted]], `font-size="11" ${fade(clock)}`);
+    if (COMPACT && m % 2) return; // every other month on phones, so labels don't collide
+    o += mono(gridX + Math.round(MONTH_START_DAY[m] / 7 / weeksPerSquare) * step, gridTop - 9, [[name, t.muted]], small(clock));
   });
   // The empty grid appears first, then every week with contributions pops in
   // in order, year by year and left to right, replaying the history.
   const square = (x, top, color, extra = "") =>
-    `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}" rx="2" fill="${color}" ${extra}/>`;
+    `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}" rx="${radius.toFixed(1)}" fill="${color}" ${extra}/>`;
   let empty = "";
   const filled = [];
   s.grid.forEach((yearRow, r) => {
     const top = gridTop + r * step;
-    o += mono(PAD, top + cell / 2 + 4, [[String(yearRow.year), t.muted]], `font-size="11" ${fade(clock)}`);
-    yearRow.weeks.forEach((week, c) => {
-      if (!week.active) return; // before joining GitHub, or still ahead this year
+    o += mono(PAD, top + cell / 2 + SMALL / 2 - 1, [[String(yearRow.year), t.muted]], small(clock));
+    for (let c = 0; c < columns; c++) {
+      const weeks = yearRow.weeks.slice(c * weeksPerSquare, (c + 1) * weeksPerSquare).filter((w) => w.active);
+      if (!weeks.length) continue; // before joining GitHub, or still ahead this year
       const x = gridX + c * step;
+      const level = Math.max(...weeks.map((w) => w.level));
       empty += square(x, top, t.heat[0]);
-      if (week.level) filled.push({ x, top, color: t.heat[week.level] });
-      else if (week.company) filled.push({ x, top, color: t.company });
-    });
+      if (level) filled.push({ x, top, color: t.heat[level] });
+      else if (weeks.some((w) => w.company)) filled.push({ x, top, color: t.company });
+    }
   });
   o += `<g ${fade(clock)}>${empty}</g>`;
   clock += 0.35;
@@ -446,26 +505,38 @@ function render(s, t) {
   });
   clock += filled.length * gap + 0.2;
 
-  const legendY = Math.round(gridTop + s.grid.length * step - 3 + 19);
-  let lx = rightEnd - 4 * ADV - 4 - 5 * 14;
-  o += mono(lx - 5 * ADV, legendY, [["less ", t.muted]], `font-size="11" ${fade(clock)}`);
-  t.heat.forEach((color, i) => {
-    o += `<rect x="${(lx + i * 14).toFixed(1)}" y="${legendY - 10}" width="11" height="11" rx="2" fill="${color}" ${fade(clock)}/>`;
-  });
-  lx += 5 * 14 + 4;
-  o += mono(lx, legendY, [["more", t.muted]], `font-size="11" ${fade(clock)}`);
-  o += mono(PAD, legendY, [[`${plural(s.allTime, "contribution")} since ${s.firstYear}`, t.muted]], `font-size="11" ${fade(clock)}`);
+  const key = COMPACT ? 9 : 11; // legend square size
+  const keyStep = key + 3;
+  const legendY = Math.round(gridTop + s.grid.length * step - CELL_GAP + 19);
+  o += mono(PAD, legendY, [[`${plural(s.allTime, "contribution")} since ${s.firstYear}`, t.muted]], small(clock));
   y = legendY;
+  const scaleY = COMPACT ? (y += LH - 2) : legendY;
+  let lx = COMPACT ? PAD + 5 * ADV : rightEnd - 4 * ADV - 4 - 5 * keyStep;
+  o += mono(lx - 5 * ADV, scaleY, [["less ", t.muted]], small(clock));
+  t.heat.forEach((color, i) => {
+    o += `<rect x="${(lx + i * keyStep).toFixed(1)}" y="${scaleY - key + 1}" width="${key}" height="${key}" rx="2" fill="${color}" ${fade(clock)}/>`;
+  });
+  lx += 5 * keyStep + 4;
+  o += mono(lx, scaleY, [["more", t.muted]], small(clock));
 
-  // What the two colors mean.
+  // What the two colors mean (one per line on phones).
   if (config.companyWork) {
-    y += LH;
+    const items = [[t.heat[3], "tracked by GitHub"], [t.company, config.companyWork.label]];
     let ix = PAD;
-    for (const [color, label] of [[t.heat[3], "tracked by GitHub"], [t.company, config.companyWork.label]]) {
-      o += `<rect x="${ix.toFixed(1)}" y="${y - 10}" width="11" height="11" rx="2" fill="${color}" ${fade(clock)}/>`;
-      o += mono(ix + 18, y, [[label, t.muted]], `font-size="11" ${fade(clock)}`);
-      ix += 18 + (label.length + 4) * ADV;
-    }
+    y += LH;
+    items.forEach(([color, label], i) => {
+      if (COMPACT && i) {
+        ix = PAD;
+        y += LH - 2;
+      }
+      o += `<rect x="${ix.toFixed(1)}" y="${y - key + 1}" width="${key}" height="${key}" rx="2" fill="${color}" ${fade(clock)}/>`;
+      const parts = COMPACT ? wrap(label, COLS - 3) : [label];
+      parts.forEach((part, j) => {
+        if (j) y += LH - 4;
+        o += mono(ix + key + 7, y, [[part, t.muted]], small(clock));
+      });
+      ix += key + 7 + (label.length + 4) * ADV;
+    });
   }
   for (const line of config.heatmapNote ? wrap(config.heatmapNote, COLS - 2) : []) {
     y += LH;
@@ -475,7 +546,7 @@ function render(s, t) {
   // Final prompt with a blinking cursor.
   y += LH + PROMPT_GAP;
   const last = prompt(y, "", clock + 0.2);
-  o += `<g ${fade(clock + 0.2)}>${last.svg}<rect x="${last.cursorX.toFixed(1)}" y="${y - 12}" width="8" height="16" fill="${t.fg}" class="c"/></g>`;
+  o += `<g ${fade(clock + 0.2)}>${last.svg}<rect x="${last.cursorX.toFixed(1)}" y="${y - SIZE + 1}" width="${ADV.toFixed(1)}" height="${SIZE + 3}" fill="${t.fg}" class="c"/></g>`;
 
   const H = y + 24;
   const frame =
@@ -499,7 +570,8 @@ function render(s, t) {
     `${fmt(s.lastYear)} contributions in the last year and ${fmt(s.allTime)} since ${s.firstYear}.`;
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">` +
-    `<title>${esc(label)}</title><style>${style}</style>${frame}${o}</svg>\n`
+    `<title>${esc(label)}</title><style>${style}</style>${frame}${o}` +
+    `<rect x="0.5" y="0.5" width="${W - 1}" height="${H - 1}" rx="10" fill="none" stroke="${t.border}"/></svg>\n`
   );
 }
 
@@ -511,16 +583,21 @@ fs.mkdirSync(outDir, { recursive: true });
 
 // Each version gets a new file name (a hash of its content) and the README is
 // pointed at it, so GitHub's image caches can never serve yesterday's card.
+// Files: terminal-<theme>-<hash>.svg and terminal-mobile-<theme>-<hash>.svg.
 const readmePath = args.readme ?? (args.out ? null : path.join(here, "../../README.md"));
-const CARD_FILE = /^terminal-(dark|light)(-[0-9a-f]+)?\.svg$/;
+const CARD_FILE = /^terminal-(mobile-)?(dark|light)(-[0-9a-f]+)?\.svg$/;
 for (const old of fs.readdirSync(outDir).filter((name) => CARD_FILE.test(name))) fs.rmSync(path.join(outDir, old));
 let readme = readmePath ? fs.readFileSync(readmePath, "utf8") : null;
-for (const [mode, theme] of Object.entries(THEMES)) {
-  const svg = render(summary, theme);
-  const name = `terminal-${mode}-${createHash("sha256").update(svg).digest("hex").slice(0, 10)}.svg`;
-  fs.writeFileSync(path.join(outDir, name), svg);
-  console.log(`wrote ${path.relative(process.cwd(), path.join(outDir, name))}`);
-  if (readme) readme = readme.replace(new RegExp(`assets/terminal-${mode}(-[0-9a-f]+)?\\.svg`, "g"), `assets/${name}`);
+for (const [layoutName, layout] of Object.entries(LAYOUTS)) {
+  useLayout(layout);
+  const prefix = layoutName === "desktop" ? "terminal" : "terminal-mobile";
+  for (const [mode, theme] of Object.entries(THEMES)) {
+    const svg = render(summary, theme);
+    const name = `${prefix}-${mode}-${createHash("sha256").update(svg).digest("hex").slice(0, 10)}.svg`;
+    fs.writeFileSync(path.join(outDir, name), svg);
+    console.log(`wrote ${path.relative(process.cwd(), path.join(outDir, name))}`);
+    if (readme) readme = readme.replace(new RegExp(`assets/${prefix}-${mode}(-[0-9a-f]+)?\\.svg`, "g"), `assets/${name}`);
+  }
 }
 if (readme) {
   fs.writeFileSync(readmePath, readme);
