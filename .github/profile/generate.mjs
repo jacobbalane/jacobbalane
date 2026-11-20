@@ -230,11 +230,11 @@ const MONTH_START_DAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 const NEUTRALS = {
   dark: {
     fg: "#f0f6fc", muted: "#9198a1", card: "#151b23", bar: "#212830", border: "#3d444d", company: "#8957e5",
-    about: "#79c0ff", stats: "#ffa657", languages: "#ffa657", projects: "#56d4dd", error: "#ff7b72",
+    about: "#79c0ff", stats: "#d2a8ff", languages: "#ffa657", projects: "#56d4dd", error: "#ff7b72",
   },
   light: {
     fg: "#1f2328", muted: "#59636e", card: "#f6f8fa", bar: "#eaeef2", border: "#d1d9e0", company: "#a475f9",
-    about: "#0969da", stats: "#bc4c00", languages: "#bc4c00", projects: "#1b7c83", error: "#cf222e",
+    about: "#0969da", stats: "#8250df", languages: "#bc4c00", projects: "#1b7c83", error: "#cf222e",
   },
 };
 // accent: prompt and bars, key: row labels, heat: contribution levels 0-4.
