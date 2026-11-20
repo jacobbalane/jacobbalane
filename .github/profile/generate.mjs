@@ -157,6 +157,15 @@ function summarize({ user, years, projects = [] }) {
   for (const week of grid.flatMap((row) => row.weeks)) {
     week.level = week.count === 0 ? 0 : week.count <= q1 ? 1 : week.count <= q2 ? 2 : week.count <= q3 ? 3 : 4;
   }
+  // Company commits use a shared work email GitHub can't credit, so from the
+  // start date in config.json, weeks GitHub shows as empty are marked as company work.
+  const companySince = config.companyWork?.since;
+  if (companySince) {
+    for (const day of days) {
+      if (day.date >= companySince) grid[Number(day.date.slice(0, 4)) - firstYear].weeks[weekOfYear(day.date)].atCompany = true;
+    }
+  }
+  for (const week of grid.flatMap((row) => row.weeks)) week.company = Boolean(week.atCompany) && week.count === 0;
 
   // Each language scores sqrt(bytes x repos using it), so one huge repo can't
   // outweigh the language most of your projects are written in.
@@ -209,6 +218,8 @@ const W = 840;
 const PAD = 24;
 const SIZE = 13;
 const LH = 21;
+const PROMPT_GAP = 26; // extra space above each command
+const OUTPUT_GAP = 8; // extra space between a command and its output
 const ADV = 7.8; // every monospace line is stretched to exactly this advance per character
 const COLS = Math.floor((W - 2 * PAD) / ADV);
 const MONO = "ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace";
@@ -217,8 +228,14 @@ const MONTH_START_DAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
 // Grays plus one accent color, chosen with "accent" in config.json.
 const NEUTRALS = {
-  dark: { fg: "#f0f6fc", muted: "#9198a1", card: "#151b23", bar: "#212830", border: "#3d444d" },
-  light: { fg: "#1f2328", muted: "#59636e", card: "#f6f8fa", bar: "#eaeef2", border: "#d1d9e0" },
+  dark: {
+    fg: "#f0f6fc", muted: "#9198a1", card: "#151b23", bar: "#212830", border: "#3d444d", company: "#8957e5",
+    about: "#79c0ff", stats: "#ffa657", languages: "#ffa657", projects: "#56d4dd", error: "#ff7b72",
+  },
+  light: {
+    fg: "#1f2328", muted: "#59636e", card: "#f6f8fa", bar: "#eaeef2", border: "#d1d9e0", company: "#a475f9",
+    about: "#0969da", stats: "#bc4c00", languages: "#bc4c00", projects: "#1b7c83", error: "#cf222e",
+  },
 };
 // accent: prompt and bars, key: row labels, heat: contribution levels 0-4.
 const ACCENTS = {
@@ -277,10 +294,10 @@ function render(s, t) {
       .join("")}</text>`;
   };
   const comment = (str) => [[str, t.muted]];
-  const row = (key, value, width = COLS) => {
+  const row = (key, value, width = COLS, color = t.key) => {
     const head = `. ${key}: `;
     const dots = Math.max(3, width - head.length - 1 - value.length);
-    return [[". ", t.muted], [`${key}:`, t.key], [` ${".".repeat(dots)} `, t.muted], [value, t.fg]];
+    return [[". ", t.muted], [`${key}:`, color], [` ${".".repeat(dots)} `, t.muted], [value, t.fg]];
   };
   // A prompt whose command types itself out: a cover and a cursor slide off it one character at a time.
   // Their resting position is past the end of the command, so without animation the text is simply shown.
@@ -309,14 +326,14 @@ function render(s, t) {
   let clock = first.end + 0.25;
 
   // Profile, full width, in the dotted style of the original README.
-  y += LH + 10;
+  y += LH + OUTPUT_GAP + 2;
   const profile = [
     comment("# about me"),
-    row("Role", config.role),
-    row("Location", config.location),
-    row("On GitHub since", monthYear(s.createdAt)),
-    row("AI tools", config.aiTools),
-    ...Object.entries(config.stack).map(([group, items]) => row(group, items.join(", "))),
+    row("Role", config.role, COLS, t.about),
+    row("Location", config.location, COLS, t.about),
+    row("On GitHub since", monthYear(s.createdAt), COLS, t.about),
+    row("AI tools", config.aiTools, COLS, t.about),
+    ...Object.entries(config.stack).map(([group, items]) => row(group, items.join(", "), COLS, t.about)),
   ];
   profile.forEach((segs, i) => {
     o += mono(PAD, y, segs, fade(clock + i * 0.04));
@@ -329,11 +346,11 @@ function render(s, t) {
   const half = Math.floor((COLS - 5) / 2);
   const stats = [
     comment("# github stats"),
-    row("Public repos", fmt(s.publicRepos), half),
-    row("Contributions", `${fmt(s.lastYear)} in the last year`, half),
-    row("Streak", s.streak.current ? `${plural(s.streak.current, "day")} (best ${fmt(s.streak.best)})` : `best ${plural(s.streak.best, "day")}`, half),
-    row("Busiest day", s.busiest, half),
-    row("Followers", fmt(s.followers), half),
+    row("Public repos", fmt(s.publicRepos), half, t.stats),
+    row("Contributions", `${fmt(s.lastYear)} in the last year`, half, t.stats),
+    row("Streak", s.streak.current ? `${plural(s.streak.current, "day")} (best ${fmt(s.streak.best)})` : `best ${plural(s.streak.best, "day")}`, half, t.stats),
+    row("Busiest day", s.busiest, half, t.stats),
+    row("Followers", fmt(s.followers), half, t.stats),
   ];
   const rightX = PAD + (half + 5) * ADV;
   const rightEnd = PAD + COLS * ADV;
@@ -349,7 +366,7 @@ function render(s, t) {
     if (l) {
       o += mono(rightX, y, [[l.name.slice(0, 11), t.fg]], fade(delay));
       o += `<rect x="${barX.toFixed(1)}" y="${y - 9}" width="${barMax.toFixed(1)}" height="8" rx="4" fill="${t.heat[0]}" ${fade(delay)}/>`;
-      o += `<rect x="${barX.toFixed(1)}" y="${y - 9}" width="${((barMax * l.pct) / maxPct).toFixed(1)}" height="8" rx="4" fill="${t.accent}" class="g" style="animation-delay:${(delay + 0.1).toFixed(2)}s"/>`;
+      o += `<rect x="${barX.toFixed(1)}" y="${y - 9}" width="${((barMax * l.pct) / maxPct).toFixed(1)}" height="8" rx="4" fill="${t.languages}" class="g" style="animation-delay:${(delay + 0.1).toFixed(2)}s"/>`;
       o += mono(rightEnd - 4 * ADV, y, [[`${l.pct}%`.padStart(4), t.muted]], fade(delay));
     }
     y += LH;
@@ -358,14 +375,14 @@ function render(s, t) {
 
   // Personal projects, in columns: name, stars, forks, language, description.
   if (s.projects.length) {
-    y += 14;
+    y += PROMPT_GAP;
     const list = prompt(y, "ls ~/projects/personal", clock + 0.15);
     o += `<g ${fade(clock)}>${list.svg}</g>`;
     clock = list.end + 0.2;
-    y += LH + 2;
+    y += LH + OUTPUT_GAP;
     s.projects.forEach((p, i) => {
       const delay = clock + i * 0.08;
-      o += mono(PAD, y, [[clip(p.name, 22), t.fg, 700]], fade(delay));
+      o += mono(PAD, y, [[clip(p.name, 22), t.projects, 700]], fade(delay));
       o += icon("star", PAD + 24 * ADV, y - 11, 13, t.muted, fade(delay));
       o += mono(PAD + 24 * ADV + 17, y, [[fmt(p.stars), t.muted]], fade(delay));
       if (p.forks) {
@@ -381,18 +398,18 @@ function render(s, t) {
 
   // Company work can't be listed, and the card says so.
   if (config.companyNote) {
-    y += s.projects.length ? 8 : 14;
+    y += PROMPT_GAP;
     const company = prompt(y, "ls ~/projects/company", clock + 0.15);
     o += `<g ${fade(clock)}>${company.svg}</g>`;
     clock = company.end + 0.2;
-    y += LH;
-    o += mono(PAD, y, [["ls: company: Permission denied", t.fg], [clip(`  # ${config.companyNote}`, COLS - 30), t.muted]], fade(clock));
+    y += LH + OUTPUT_GAP;
+    o += mono(PAD, y, [["ls: company: ", t.fg], ["Permission denied", t.error], [clip(`  # ${config.companyNote}`, COLS - 30), t.muted]], fade(clock));
     y += LH;
     clock += 0.3;
   }
 
   // All-time contributions: one row per year, one square per week.
-  y += 14;
+  y += PROMPT_GAP;
   const second = prompt(y, "contributions --all-time", clock + 0.15);
   o += `<g ${fade(clock)}>${second.svg}</g>`;
   clock = second.end + 0.2;
@@ -400,7 +417,7 @@ function render(s, t) {
   const gridX = PAD + labelW;
   const step = (COLS * ADV - labelW + 3) / 53; // the grid ends where the text does
   const cell = step - 3;
-  const gridTop = y + 30;
+  const gridTop = y + 30 + OUTPUT_GAP;
   MONTHS.forEach((name, m) => {
     o += mono(gridX + Math.round(MONTH_START_DAY[m] / 7) * step, gridTop - 9, [[name, t.muted]], `font-size="11" ${fade(clock)}`);
   });
@@ -418,6 +435,7 @@ function render(s, t) {
       const x = gridX + c * step;
       empty += square(x, top, t.heat[0]);
       if (week.level) filled.push({ x, top, color: t.heat[week.level] });
+      else if (week.company) filled.push({ x, top, color: t.company });
     });
   });
   o += `<g ${fade(clock)}>${empty}</g>`;
@@ -438,13 +456,24 @@ function render(s, t) {
   o += mono(lx, legendY, [["more", t.muted]], `font-size="11" ${fade(clock)}`);
   o += mono(PAD, legendY, [[`${plural(s.allTime, "contribution")} since ${s.firstYear}`, t.muted]], `font-size="11" ${fade(clock)}`);
   y = legendY;
+
+  // What the two colors mean.
+  if (config.companyWork) {
+    y += LH;
+    let ix = PAD;
+    for (const [color, label] of [[t.heat[3], "tracked by GitHub"], [t.company, config.companyWork.label]]) {
+      o += `<rect x="${ix.toFixed(1)}" y="${y - 10}" width="11" height="11" rx="2" fill="${color}" ${fade(clock)}/>`;
+      o += mono(ix + 18, y, [[label, t.muted]], `font-size="11" ${fade(clock)}`);
+      ix += 18 + (label.length + 4) * ADV;
+    }
+  }
   for (const line of config.heatmapNote ? wrap(config.heatmapNote, COLS - 2) : []) {
     y += LH;
     o += mono(PAD, y, comment(`# ${line}`), fade(clock));
   }
 
   // Final prompt with a blinking cursor.
-  y += LH + 14;
+  y += LH + PROMPT_GAP;
   const last = prompt(y, "", clock + 0.2);
   o += `<g ${fade(clock + 0.2)}>${last.svg}<rect x="${last.cursorX.toFixed(1)}" y="${y - 12}" width="8" height="16" fill="${t.fg}" class="c"/></g>`;
 

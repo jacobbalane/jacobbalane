@@ -17,6 +17,6 @@
     { "repo": "jacobbalane/react-cebu", "description": "The 2026 website for the React Cebu community" }
   ],
   "companyNote": "company projects live in private repos",
-  "heatmapNote": "Excludes company work: private repos I don't own, committed under a separate work email and name.",
+  "companyWork": { "since": "2025-02-01", "label": "company work in private repos: ~6k+ contributions" },
   "excludeLanguages": ["Jupyter Notebook"]
 }
